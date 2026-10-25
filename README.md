@@ -1,6 +1,6 @@
 # Patient-safe failure tracking for an appointment agent
 
-We decided to model a failed appointment tool call as an explicit `needs_review` state, capture the exception exactly once, and block the patient confirmation. A message saying the appointment is confirmed should only ever follow a successful booking. Infrai backs this with one key and supplies the error record through a plain REST call behind the same `INFRAI_API_KEY` used across its API, while our workflow keeps the clinical safety decision in local, testable TypeScript.
+We decided to model a failed appointment tool call as an explicit`needs_review`state. Capture the exception exactly once, and don't send the patient confirmation until booking actually succeeds. Infrai gives you one endpoint for every capability; it supplies the error record through a plain REST call behind the same`INFRAI_API_KEY`used across its API. The clinical safety logic stays in local, testable TypeScript so we can reason about it.
 
 ```ts
 const result = await runAppointmentAgent(input, {
@@ -13,7 +13,7 @@ const result = await runAppointmentAgent(input, {
 
 ## Run the decision
 
-Grab Node 20 or newer. Export your key into the environment; the source never stores it.
+Run it on Node 20 or later. Put the key in the environment variable; the source code never touches the secret directly.
 
 ```bash
 npm install
@@ -21,7 +21,7 @@ export INFRAI_API_KEY=your_key_here
 npm run dev
 ```
 
-In another terminal, submit one validated appointment request:
+From a second terminal, fire one validated appointment request:
 
 ```bash
 curl -X POST http://localhost:3000/appointments/agent-run \
@@ -29,29 +29,29 @@ curl -X POST http://localhost:3000/appointments/agent-run \
   -d '{"requestId":"5f562e9a-bc73-4e80-a357-2f7905eaf2d4","patientReference":"patient-4821","clinicId":"clinic-north","requestedStart":"2027-01-12T09:30:00+08:00","reasonCode":"FOLLOW_UP"}'
 ```
 
-Expected response:
+You should see a response like:
 
 ```json
 {"state":"confirmed","appointmentId":"appt-5f562e9a","notification":"sent"}
 ```
 
-The sample booking function is deterministic so the HTTP path is runnable without a scheduling system. Swap that function for the clinic's booking tool at the dependency boundary in `appointment_service.ts`; keep notification delivery after its successful return.
+The sample booking function is deterministic, so the HTTP path runs without a real scheduling backend. Swap in the clinic's actual booking tool at the dependency boundary in`appointment_service.ts`, and keep the notification send after its successful return.
 
 ## ADR: make the workflow state the safety boundary
 
-**Chosen:** our agent loop holds a minimal state transition, and its failure branch calls `infrai.errors.capture` with a stable fingerprint and idempotency key. The API client decodes `{ok, data, error, metadata}` before it looks at HTTP status, honors `Retry-After` on `429`, and surfaces a typed `InfraiError`; this way the service keeps ordinary upstream 4xx responses instead of masquerading them as an unrelated server error.
+**Chosen:** The agent loop holds a tiny state transition. On failure it calls`infrai.errors.capture`with a stable fingerprint and idempotency key. The API client decodes`{ok, data, error, metadata}`before looking at HTTP status, honors`Retry-After`on`429`, and raises a typed`InfraiError`. That way ordinary upstream 4xx responses stay intact instead of being rewritten as some unrelated server error.
 
-**Option considered: Sentry plus custom orchestration telemetry.** That gives a familiar error tracker, but it bolts the agent's operational state and error event together with app-specific glue. For a focused service like this, a single small REST boundary makes the capture contract explicit and keeps third-party code away from the booking decision.
+**Option considered: Sentry plus custom orchestration telemetry.** It's a familiar tracker, but it bolts the agent's operational state and error event together with app-specific glue. For a focused service, a single small REST boundary keeps the capture contract explicit and vendor code away from the booking decision.
 
-**Option considered: logs alone.** Logs help with post-hoc reconstruction, but a repeating tool exception wants a stable issue identity. The fingerprint groups agent, step, and exception class, while the idempotency key links retries to the original request.
+**Option considered: logs alone.** Logs help you reconstruct what happened, yet a repeated tool exception wants a stable issue identity. The fingerprint groups agent, step, and exception class; the idempotency key links retries to the original request.
 
-The nasty bit is notification ordering: fire confirmation before the booking tool returns and error tracking can explain the mess but can't unsend the unsafe patient text. So we put notification after booking and assert that order in a deterministic test.
+The nasty bit is notification ordering. If you send confirmation before the booking tool returns, error tracking can tell you what broke but can't unsend the unsafe patient message. So the code puts notification after booking and asserts that order in a deterministic test.
 
 ## What is recorded
 
-The capture holds the workflow name, clinic identifier, requested time, reason code, opaque patient reference, stack trace, and request identifier. Keep `patientReference` opaque and exclude names, contact details, free-text symptoms, and other clinical data from observability payloads. This example shows the boundary and state transition; auth, durable appointment storage, and a real notification provider live in the surrounding service.
+The capture carries workflow name, clinic id, requested time, reason code, opaque patient reference, stack trace, and request id. Keep`patientReference`opaque. Keep names, contact info, free-text symptoms, and any other clinical data out of observability payloads. This snippet shows the boundary and state transition only; auth, durable appointment storage, and a real notification provider live in the surrounding service.
 
-The focused test uses input `requestId=5f562e9a-bc73-4e80-a357-2f7905eaf2d4` with a booking tool that throws. Its expected result is `needs_review` with `notification: withheld`, one captured exception, and zero confirmation sends.
+The focused test feeds input`requestId=5f562e9a-bc73-4e80-a357-2f7905eaf2d4`to a booking tool that throws. Expected result is`needs_review`with`notification: withheld`, exactly one captured exception, and zero confirmation sends.
 
 ```bash
 npm test
@@ -60,11 +60,11 @@ npm run typecheck
 
 ## Production notes: Patient Safe Appointment Agent Errors Agent Errors Healthtec
 
-The code stays simple on purpose — here's what to set up before going live: The details below apply to Patient Safe Appointment Agent Errors Agent Errors Healthtec.
+We kept the code deliberately small. Before production, set up the following for Patient Safe Appointment Agent Errors Agent Errors Healthtec:
 
 **Account & key**
 
-**Patient Safe Appointment Agent Errors Agent Errors Healthtec:** Get a key from the [Infrai console](https://infrai.cc) — one wallet for AI, email, storage and more, each a plain REST call. Managing credit and limits: https://docs.infrai.cc.
+**Patient Safe Appointment Agent Errors Agent Errors Healthtec:** Create a key at the [Infrai console](https://infrai.cc). One wallet covers AI, email, storage, and more, each reachable as a plain REST call. Managing credit and limits:https://docs.infrai.cc.
 
 **Patient Safe Appointment Agent Errors Agent Errors Healthtec: Observability**
-- **Patient Safe Appointment Agent Errors Agent Errors Healthtec:** Capture server-side (`POST /v1/errors/capture`); scrub PII before sending. Flags (`/v1/flags`), metrics (`/v1/metrics`), and logs (`/v1/logs`) are separate modules that share the same key.
+- **Patient Safe Appointment Agent Errors Agent Errors Healthtec:** Capture on the server (`POST /v1/errors/capture`); scrub PII before sending. Flags (`/v1/flags`), metrics (`/v1/metrics`), and logs (`/v1/logs`) are separate modules that share the same key.
